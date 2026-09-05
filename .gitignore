@@ -1,3 +1,11 @@
+# Hailstorm run artifacts
+results.json
+*.ubj
+ray_results/
+optuna.db
+optuna.db.dashboard.pid
+*.sqlite3
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
