@@ -41,7 +41,8 @@ The `ray[default]` extra is required for the local dashboard at
 `--mode real --trials 40 --cpus-per-trial 4` against the public TLC bucket.
 
 Useful flags: `--hpo-rows`, `--fixture-rows`, `--out`, `--optuna-db`,
-`--optuna-port`, `--start-head`, `--stop-head`.
+`--optuna-port`, `--metrics-export-port`, `--start-head`, `--stop-head`,
+`--start-metrics`, `--stop-metrics`.
 
 Equivalent module forms: `python -m hailstorm` or
 `python -m hailstorm.nyc_taxi_tips`.
@@ -138,7 +139,10 @@ until `hailstorm --stop-head`.
 |---|---|---|
 | **Ray Cluster** | `http://127.0.0.1:8265/#/cluster` | Node CPUs, object store, workers |
 | **Ray Jobs** | `http://127.0.0.1:8265/#/jobs` | This driver (job id is printed) and Tune trial tasks |
+| **Ray Metrics** | `http://127.0.0.1:8265/#/metrics` | Embedded Grafana (after `--start-metrics`) |
 | **Optuna** | `http://127.0.0.1:8080` | Study `taxi_tip_hpo`: TPE proposals, history, importances |
+| **Prometheus** | `http://127.0.0.1:9090` | Raw scrapes (`ray_dashboard_api_requests_count_requests_total`) |
+| **Grafana** | `http://127.0.0.1:3000` | Ray dashboards (admin / admin) |
 
 **Overview → Recent Jobs** only lists **Submit as a job**. Headless and
 headed attach are interactive drivers — use **Jobs** and **Cluster**.
@@ -153,6 +157,49 @@ as soon as the process begins. After a run you can reopen the same file:
 
 ```bash
 optuna-dashboard sqlite:///optuna.db
+```
+
+## Prometheus and Grafana (Docker)
+
+Do **not** install the unsigned Prometheus / Grafana Mac binaries
+(`ray metrics launch-prometheus` hits Gatekeeper). Run them as Docker
+images instead. Ray exports metrics; Prometheus scrapes Ray; Grafana
+queries Prometheus; Ray Dashboard embeds Grafana when the env vars below
+are set (hailstorm sets them by default).
+
+Start the containers **before** or right after the Ray cluster:
+
+```bash
+hailstorm --start-metrics
+# equivalent: docker compose -f docker-compose.metrics.yml up -d
+```
+
+Then headless or headed as usual. Hailstorm pins Ray's scrape port at
+**44217** so it does not collide with Optuna on 8080, and points the
+dashboard at:
+
+```text
+RAY_PROMETHEUS_HOST=http://127.0.0.1:9090
+RAY_GRAFANA_HOST=http://127.0.0.1:3000
+RAY_GRAFANA_IFRAME_HOST=http://127.0.0.1:3000
+```
+
+Prometheus reaches Ray on the Mac via `host.docker.internal`. We do not
+mount `/tmp/ray/session_latest` — Docker will not follow that symlink.
+
+After the head is up, hailstorm copies Ray's Grafana JSON into
+`metrics/grafana/dashboards/` so Grafana's file provisioner picks them
+up (folder **Ray**). Health checks:
+
+```text
+http://127.0.0.1:8265/api/prometheus_health
+http://127.0.0.1:8265/api/grafana_health
+```
+
+Stop the stack (does not stop Ray):
+
+```bash
+hailstorm --stop-metrics
 ```
 
 ## What each library is actually doing
@@ -234,6 +281,8 @@ Rough guide:
 pyproject.toml                setuptools project + hailstorm CLI entry
 setup.py                      setuptools shim
 requirements.txt              runtime deps (also declared in pyproject.toml)
+docker-compose.metrics.yml    Prometheus + Grafana (host.docker.internal)
+metrics/                      scrape config + Grafana provisioning
 hailstorm/
   cli.py                      hailstorm
   nyc_taxi_tips/

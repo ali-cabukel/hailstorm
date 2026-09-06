@@ -42,6 +42,11 @@ FIXTURE_TRAIN = [(2023, m) for m in (1, 4, 7, 10)]
 FIXTURE_VALID = [(2024, 1)]
 FIXTURE_TEST = [(2024, 4)]
 
+# Optuna uses 8080. Ray's metrics demo often uses 8080 too — do not collide.
+DEFAULT_METRICS_EXPORT_PORT = 44217
+DEFAULT_PROMETHEUS_HOST = "http://127.0.0.1:9090"
+DEFAULT_GRAFANA_HOST = "http://127.0.0.1:3000"
+
 
 def _dashboard_url(info) -> str | None:
     """Ray returns `127.0.0.1:8265` or a full URL depending on version."""
@@ -138,8 +143,88 @@ def _stop_optuna_dashboard(db_path: Path) -> None:
     pid_path.unlink(missing_ok=True)
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _compose_file() -> Path:
+    return _repo_root() / "docker-compose.metrics.yml"
+
+
+def _configure_metrics_env() -> None:
+    """Tell Ray Dashboard where Docker Prometheus / Grafana live (host URLs)."""
+    os.environ.setdefault("RAY_PROMETHEUS_HOST", DEFAULT_PROMETHEUS_HOST)
+    os.environ.setdefault("RAY_GRAFANA_HOST", DEFAULT_GRAFANA_HOST)
+    os.environ.setdefault(
+        "RAY_GRAFANA_IFRAME_HOST",
+        os.environ.get("RAY_GRAFANA_HOST", DEFAULT_GRAFANA_HOST),
+    )
+    os.environ.setdefault("RAY_PROMETHEUS_NAME", "Prometheus")
+    for key in (
+        "RAY_PROMETHEUS_HOST",
+        "RAY_GRAFANA_HOST",
+        "RAY_GRAFANA_IFRAME_HOST",
+    ):
+        os.environ[key] = os.environ[key].rstrip("/")
+
+
+def _log_metrics_urls() -> None:
+    prom = os.environ.get("RAY_PROMETHEUS_HOST", DEFAULT_PROMETHEUS_HOST)
+    graf = os.environ.get("RAY_GRAFANA_IFRAME_HOST") or os.environ.get(
+        "RAY_GRAFANA_HOST", DEFAULT_GRAFANA_HOST,
+    )
+    _log(f"[metrics] Prometheus {prom}  (query ray_dashboard_api_requests_count_requests_total)")
+    _log(f"[metrics] Grafana    {graf}  (admin / admin)")
+    if not _port_open("127.0.0.1", 9090):
+        _log("[metrics] Prometheus is not up — start with: hailstorm --start-metrics")
+
+
+def _copy_ray_grafana_dashboards() -> None:
+    src = Path("/tmp/ray/session_latest/metrics/grafana/dashboards")
+    dst = _repo_root() / "metrics" / "grafana" / "dashboards"
+    if not src.is_dir():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for path in src.glob("*.json"):
+        shutil.copy2(path, dst / path.name)
+        copied += 1
+    if copied:
+        _log(f"[metrics] copied {copied} Ray Grafana dashboard(s) to {dst}")
+
+
+def _docker_compose(*args: str) -> int:
+    compose = _compose_file()
+    if not compose.is_file():
+        _log(f"[metrics] missing {compose}")
+        return 1
+    docker = shutil.which("docker")
+    if not docker:
+        _log("[metrics] docker not on PATH")
+        return 1
+    cmd = [docker, "compose", "-f", str(compose), *args]
+    return subprocess.call(cmd)
+
+
+def _start_metrics() -> None:
+    _log("[metrics] starting Prometheus + Grafana (Docker)")
+    code = _docker_compose("up", "-d")
+    if code != 0:
+        raise SystemExit(code)
+    _log("[metrics] Prometheus http://127.0.0.1:9090")
+    _log("[metrics] Grafana    http://127.0.0.1:3000  (admin / admin)")
+
+
+def _stop_metrics() -> None:
+    code = _docker_compose("down")
+    if code != 0:
+        raise SystemExit(code)
+    _log("[metrics] Prometheus + Grafana stopped")
+
+
 def _start_head(args: argparse.Namespace) -> None:
     """Standing Ray head + Optuna dashboard (headed / job-submit)."""
+    _configure_metrics_env()
     db_path = Path(args.optuna_db)
     storage = sqlite_url(db_path)
     _start_optuna_dashboard(
@@ -150,10 +235,13 @@ def _start_head(args: argparse.Namespace) -> None:
         ray_exe, "start", "--head",
         "--dashboard-host=127.0.0.1",
         "--num-cpus=4",
+        f"--metrics-export-port={args.metrics_export_port}",
         "--disable-usage-stats",
     ])
+    _copy_ray_grafana_dashboards()
     _log("[ray] dashboard http://127.0.0.1:8265")
     _log(f"[optuna] dashboard http://127.0.0.1:{args.optuna_port}")
+    _log_metrics_urls()
     _log("[ray] headed cluster is up — attach with RAY_ADDRESS=auto hailstorm ...")
 
 
@@ -177,8 +265,9 @@ def _existing_cluster() -> bool:
     )
 
 
-def _init_ray():
+def _init_ray(metrics_export_port: int = DEFAULT_METRICS_EXPORT_PORT):
     """Standalone: start a local head + dashboard. Job / RAY_ADDRESS: attach."""
+    _configure_metrics_env()
     if _existing_cluster():
         _log("[ray] attaching to the running cluster (no new dashboard)")
         _log("[ray] if this sits on 'Connected' with no [ray] connected line,")
@@ -191,13 +280,16 @@ def _init_ray():
         )
     _log("[ray] starting local cluster (num_cpus=4, avoids 14 hung prestart workers) ...")
     try:
-        return ray.init(
+        info = ray.init(
             num_cpus=4,
             ignore_reinit_error=True,
             log_to_driver=False,
             include_dashboard=True,
             dashboard_host="127.0.0.1",
+            _metrics_export_port=metrics_export_port,
         )
+        _copy_ray_grafana_dashboards()
+        return info
     except Exception as exc:
         _log(f"[ray] dashboard failed to start ({exc}); continuing without it")
         if ray.is_initialized():
@@ -207,6 +299,7 @@ def _init_ray():
             ignore_reinit_error=True,
             log_to_driver=False,
             include_dashboard=False,
+            _metrics_export_port=metrics_export_port,
         )
 
 
@@ -225,19 +318,40 @@ def main() -> None:
     ap.add_argument("--optuna-db", type=str, default="optuna.db",
                     help="SQLite file for the Optuna study (required by optuna-dashboard).")
     ap.add_argument("--optuna-port", type=int, default=8080)
+    ap.add_argument("--metrics-export-port", type=int,
+                    default=DEFAULT_METRICS_EXPORT_PORT,
+                    help="Ray Prometheus scrape port (not 8080 — Optuna).")
     ap.add_argument("--start-head", action="store_true",
                     help="Start a standing Ray head and Optuna dashboard, then exit.")
     ap.add_argument("--stop-head", action="store_true",
                     help="Stop the standing Ray head and Optuna dashboard.")
+    ap.add_argument("--start-metrics", action="store_true",
+                    help="Start Prometheus + Grafana via docker-compose.metrics.yml.")
+    ap.add_argument("--stop-metrics", action="store_true",
+                    help="Stop the Prometheus + Grafana containers.")
     args = ap.parse_args()
     try:
         sys.stdout.reconfigure(line_buffering=True)
     except Exception:
         pass
 
-    if args.start_head and args.stop_head:
-        _log("hailstorm: use only one of --start-head / --stop-head")
+    exclusive = [
+        name for name, on in (
+            ("--start-head", args.start_head),
+            ("--stop-head", args.stop_head),
+            ("--start-metrics", args.start_metrics),
+            ("--stop-metrics", args.stop_metrics),
+        ) if on
+    ]
+    if len(exclusive) > 1:
+        _log("hailstorm: use only one of " + ", ".join(exclusive))
         raise SystemExit(2)
+    if args.start_metrics:
+        _start_metrics()
+        return
+    if args.stop_metrics:
+        _stop_metrics()
+        return
     if args.start_head:
         _start_head(args)
         return
@@ -273,8 +387,9 @@ def _run(args: argparse.Namespace) -> None:
         train_m, valid_m, test_m = TRAIN_MONTHS, VALID_MONTHS, TEST_MONTHS
         _log("[data] using public TLC parquet URLs (this will download)")
 
-    info = _init_ray()
+    info = _init_ray(args.metrics_export_port)
     _log("[ray] connected")
+    _log_metrics_urls()
     dash = _dashboard_url(info)
     if dash:
         base = dash.rstrip("/")
