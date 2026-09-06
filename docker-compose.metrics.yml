@@ -1,0 +1,38 @@
+# Prometheus + Grafana for a Ray cluster running on the Mac host.
+# Start Ray first (or at least soon after): hailstorm --start-head
+# or a headless hailstorm run. Metrics port is 44217 (not 8080 — Optuna).
+#
+#   docker compose -f docker-compose.metrics.yml up -d
+#   # or: hailstorm --start-metrics
+services:
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./metrics/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_SECURITY_COOKIE_SAMESITE: none
+      GF_SECURITY_COOKIE_SECURE: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: light
+    volumes:
+      - ./metrics/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./metrics/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus

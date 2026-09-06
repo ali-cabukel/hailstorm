@@ -1,0 +1,24 @@
+# Prometheus scrapes Ray on the Mac host. Do not mount
+# /tmp/ray/session_latest — that path is a symlink and Docker will not follow it.
+# HTTP SD returns 127.0.0.1, which from this container is Prometheus itself,
+# so rewrite it to host.docker.internal. Static scrape is the laptop fallback.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: ray
+    http_sd_configs:
+      - url: http://host.docker.internal:8265/api/prometheus/sd
+        refresh_interval: 15s
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "127\\.0\\.0\\.1:(.*)"
+        replacement: "host.docker.internal:$1"
+        target_label: __address__
+
+  - job_name: ray-local
+    static_configs:
+      - targets: ["host.docker.internal:44217"]
+        labels:
+          cluster: hailstorm

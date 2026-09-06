@@ -1,7 +1,12 @@
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 from hailstorm.nyc_taxi_tips.run import (
+    DEFAULT_GRAFANA_HOST,
+    DEFAULT_METRICS_EXPORT_PORT,
+    DEFAULT_PROMETHEUS_HOST,
+    _configure_metrics_env,
     _dashboard_url,
     _existing_cluster,
     _optuna_pid_path,
@@ -37,6 +42,29 @@ def test_port_open_closed_port() -> None:
 
 def test_optuna_pid_path(tmp_path: Path) -> None:
     assert _optuna_pid_path(tmp_path / "optuna.db").name == "optuna.db.dashboard.pid"
+
+
+def test_configure_metrics_env_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("RAY_PROMETHEUS_HOST", raising=False)
+    monkeypatch.delenv("RAY_GRAFANA_HOST", raising=False)
+    monkeypatch.delenv("RAY_GRAFANA_IFRAME_HOST", raising=False)
+    monkeypatch.delenv("RAY_PROMETHEUS_NAME", raising=False)
+    _configure_metrics_env()
+    assert os.environ["RAY_PROMETHEUS_HOST"] == DEFAULT_PROMETHEUS_HOST
+    assert os.environ["RAY_GRAFANA_HOST"] == DEFAULT_GRAFANA_HOST
+    assert os.environ["RAY_GRAFANA_IFRAME_HOST"] == DEFAULT_GRAFANA_HOST
+    assert os.environ["RAY_PROMETHEUS_NAME"] == "Prometheus"
+    assert DEFAULT_METRICS_EXPORT_PORT != 8080
+
+
+def test_configure_metrics_env_keeps_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("RAY_PROMETHEUS_HOST", "http://127.0.0.1:19090/")
+    monkeypatch.setenv("RAY_GRAFANA_HOST", "http://127.0.0.1:13000/")
+    monkeypatch.delenv("RAY_GRAFANA_IFRAME_HOST", raising=False)
+    _configure_metrics_env()
+    assert os.environ["RAY_PROMETHEUS_HOST"] == "http://127.0.0.1:19090"
+    assert os.environ["RAY_GRAFANA_HOST"] == "http://127.0.0.1:13000"
+    assert os.environ["RAY_GRAFANA_IFRAME_HOST"] == "http://127.0.0.1:13000"
 
 
 def test_existing_cluster_from_job_env(monkeypatch) -> None:

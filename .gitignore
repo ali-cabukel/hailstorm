@@ -5,6 +5,7 @@ ray_results/
 optuna.db
 optuna.db.dashboard.pid
 *.sqlite3
+metrics/grafana/dashboards/*.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
